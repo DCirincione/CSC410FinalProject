@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+{% block title %}Stats Predictor | NFL AI Predictor{% endblock %}
+{% block content %}
+<style>
+  .wrap { max-width: 1100px; margin: 32px auto 48px; padding: 0 28px; display: grid; gap: 18px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  }
+  .card h1 { margin: 0 0 10px; font-size: 28px; }
+  .muted { color: var(--muted); }
+  form { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; }
+  label { display: grid; gap: 6px; font-weight: 600; }
+  select, input {
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+  }
+  button {
+    padding: 14px 18px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: linear-gradient(120deg, rgba(90, 226, 140, 0.2), rgba(90, 226, 140, 0.08));
+    color: var(--text);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .table-card { display: grid; gap: 12px; }
+  table { width: 100%; border-collapse: collapse; color: var(--text); }
+  th, td { padding: 10px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); text-align: left; font-size: 14px; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:hover { background: rgba(255, 255, 255, 0.03); }
+  .pill { background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); padding: 6px 10px; border-radius: 999px; color: var(--muted); font-size: 12px; }
+  .opp-header {
+    text-align: center;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 10px 10px 0 0;
+  }
+  .opp-cell {
+    background: rgba(255, 255, 255, 0.06);
+  }
+</style>
+
+<div class="wrap">
+  <div class="card">
+    <h1>Stats Predictor</h1>
+    <p class="muted">Choose position, season, and scoring to fetch projections for the upcoming week (auto-detected). Results will render below.</p>
+    <form>
+      <label>Position
+        <select name="position">
+          <option>WR</option>
+          <option>RB</option>
+          <option>QB</option>
+          <option>TE</option>
+        </select>
+      </label>
+      <label>Season
+        <input type="number" name="season" value="2025" min="2015" max="2026">
+      </label>
+      <label>Scoring
+        <select name="scoring">
+          <option value="ppr">PPR</option>
+          <option value="half">Half PPR</option>
+          <option value="standard">Standard</option>
+        </select>
+      </label>
+      <label>Number of Players
+        <input type="number" name="top" value="10" min="5" max="50">
+      </label>
+      <div style="display:flex;align-items:flex-end;gap:10px;">
+        <button type="button" onclick="fetchResults()">Get Results</button>
+        <span class="pill" id="status-pill">Ready</span>
+      </div>
+    </form>
+  </div>
+
+  <div class="card table-card">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <h2 style="margin:0;">Results</h2>
+      <span class="pill" id="result-kind">Pending</span>
+    </div>
+    <div id="table-container" class="muted">Run a search to see data.</div>
+  </div>
+</div>
+
+<script>
+  const statusPill = document.getElementById("status-pill");
+  const tableContainer = document.getElementById("table-container");
+  const resultKind = document.getElementById("result-kind");
+
+  async function fetchResults() {
+    const form = document.querySelector("form");
+    const params = new URLSearchParams(new FormData(form));
+    params.delete("week"); // always predict upcoming week
+
+    statusPill.textContent = "Loading...";
+    resultKind.textContent = "Projection";
+    try {
+      const res = await fetch("/api/projections/?" + params.toString());
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to load");
+      }
+      const rows = data.rows || [];
+      const weekLabel = rows.length ? `Week ${rows[0].predicted_week || "Upcoming"}` : "Upcoming week";
+      renderTable(rows, weekLabel);
+      statusPill.textContent = "Success";
+    } catch (err) {
+      statusPill.textContent = "Error";
+      tableContainer.innerHTML = `<div class="muted">Error: ${err.message}</div>`;
+    }
+  }
+
+  function formatValue(val) {
+    if (val === null || val === undefined) return "";
+    if (typeof val === "number") {
+      const isInt = Number.isInteger(val);
+      return isInt ? val.toString() : val.toFixed(2);
+    }
+    return val;
+  }
+
+  function renderTable(rows, badge) {
+    if (!rows || rows.length === 0) {
+      tableContainer.innerHTML = "<div class='muted'>No data.</div>";
+      tableContainer.dataset.rows = "[]";
+      return;
+    }
+    const offenseCols = [
+      "player_name",
+      "team",
+      "predicted_week",
+      "predicted_fantasy_points",
+      "fp_prev1",
+      "fp_roll3",
+      "fp_roll5",
+      "fp_season_avg",
+    ];
+    const defenseCols = [
+      "def_team",
+      "def_fp_prev1",
+      "def_fp_roll3",
+      "def_fp_roll5",
+      "def_fp_season_avg",
+    ];
+    const labels = {
+      player_name: "Player",
+      team: "Team",
+      predicted_week: "Week",
+      predicted_fantasy_points: "Projected FP",
+      fp_prev1: "Last Game FP",
+      fp_roll3: "Last 3 Game Avg",
+      fp_roll5: "Last 5 Game Avg",
+      fp_season_avg: "Season Avg",
+      def_team: "Defense",
+      def_fp_prev1: "Defense Last Game",
+      def_fp_roll3: "Defense Last 3 Game Avg",
+      def_fp_roll5: "Defense Last 5 Game Avg",
+      def_fp_season_avg: "Defense Season Avg",
+    };
+    const keysAll = Object.keys(rows[0]);
+    const offense = offenseCols.filter(k => keysAll.includes(k));
+    const defense = defenseCols.filter(k => keysAll.includes(k));
+    const keys = [...offense, ...defense];
+
+    const headerGroup = `<tr><th colspan="${offense.length}"></th><th class="opp-header" colspan="${defense.length}">Opponent Stats</th></tr>`;
+    const headerLabels = `<tr>${keys.map(k => `<th data-key="${k}">${labels[k] || k}</th>`).join("")}</tr>`;
+    const body = rows.map(r => `<tr>${offense.map(k => `<td>${formatValue(r[k])}</td>`).join("")}${defense.map(k => `<td class="opp-cell">${formatValue(r[k])}</td>`).join("")}</tr>`).join("");
+    tableContainer.innerHTML = `<table><thead>${headerGroup}${headerLabels}</thead><tbody>${body}</tbody></table>`;
+    tableContainer.dataset.rows = JSON.stringify(rows);
+    tableContainer.dataset.keys = JSON.stringify(keys);
+    if (badge) {
+      resultKind.textContent = badge;
+    }
+  }
+
+  tableContainer.addEventListener("click", (e) => {
+    const th = e.target.closest("th");
+    if (!th || !th.dataset.key) return;
+    const key = th.dataset.key;
+    const rows = JSON.parse(tableContainer.dataset.rows || "[]");
+    const keys = JSON.parse(tableContainer.dataset.keys || "[]");
+    if (!rows.length) return;
+    const currentDir = th.dataset.dir === "asc" ? "desc" : "asc";
+    const sorted = [...rows].sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+      if (typeof av === "number" && typeof bv === "number") {
+        return currentDir === "asc" ? av - bv : bv - av;
+      }
+      return currentDir === "asc"
+        ? String(av ?? "").localeCompare(String(bv ?? ""))
+        : String(bv ?? "").localeCompare(String(av ?? ""));
+    });
+    th.dataset.dir = currentDir;
+    // re-render with sorted rows
+    const offenseCols = [
+      "player_name",
+      "team",
+      "predicted_week",
+      "predicted_fantasy_points",
+      "fp_prev1",
+      "fp_roll3",
+      "fp_roll5",
+      "fp_season_avg",
+    ];
+    const defenseCols = [
+      "def_team",
+      "def_fp_prev1",
+      "def_fp_roll3",
+      "def_fp_roll5",
+      "def_fp_season_avg",
+    ];
+    const offense = offenseCols.filter(k => keys.includes(k));
+    const defense = defenseCols.filter(k => keys.includes(k));
+    const labels = {
+      player_name: "Player",
+      team: "Team",
+      predicted_week: "Week",
+      predicted_fantasy_points: "Projected FP",
+      fp_prev1: "Last Game FP",
+      fp_roll3: "Last 3 Game Avg",
+      fp_roll5: "Last 5 Game Avg",
+      fp_season_avg: "Season Avg",
+      def_team: "Opponent Defense",
+      def_fp_prev1: "Defense Last Game",
+      def_fp_roll3: "Defense Last 3 Game Avg",
+      def_fp_roll5: "Defense Last 5 Game Avg",
+      def_fp_season_avg: "Defense Season Avg",
+    };
+    const headerGroup = `<tr><th colspan="${offense.length}"></th><th class="opp-header" colspan="${defense.length}">Opponent Stats</th></tr>`;
+    const headerLabels = `<tr>${keys.map(k => `<th data-key="${k}" data-dir="${th.dataset.dir}">${labels[k] || k}</th>`).join("")}</tr>`;
+    const body = sorted.map(r => `<tr>${offense.map(k => `<td>${formatValue(r[k])}</td>`).join("")}${defense.map(k => `<td class="opp-cell">${formatValue(r[k])}</td>`).join("")}</tr>`).join("");
+    tableContainer.innerHTML = `<table><thead>${headerGroup}${headerLabels}</thead><tbody>${body}</tbody></table>`;
+    tableContainer.dataset.rows = JSON.stringify(sorted);
+    tableContainer.dataset.keys = JSON.stringify(keys);
+  });
+</script>
+{% endblock %}

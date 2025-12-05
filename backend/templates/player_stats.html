@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block title %}Player Stats | NFL AI Predictor{% endblock %}
+{% block content %}
+<style>
+  .wrap { max-width: 1100px; margin: 32px auto 48px; padding: 0 28px; display: grid; gap: 18px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  }
+  .card h1 { margin: 0 0 10px; font-size: 28px; }
+  .muted { color: var(--muted); }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .field { display: grid; gap: 6px; font-weight: 600; }
+  select, input {
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+  }
+  button {
+    padding: 12px 16px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: linear-gradient(120deg, rgba(90, 226, 140, 0.2), rgba(90, 226, 140, 0.08));
+    color: var(--text);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .grid { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  .card.table-card { display: grid; gap: 12px; width: 100%; }
+  .table-title { display:flex; align-items:center; justify-content: space-between; gap: 10px; }
+  table { width: 100%; border-collapse: collapse; color: var(--text); }
+  th, td { padding: 10px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); text-align: left; font-size: 14px; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:hover { background: rgba(255, 255, 255, 0.03); }
+  .pill { background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); padding: 6px 10px; border-radius: 999px; color: var(--muted); font-size: 12px; }
+</style>
+
+<div class="wrap">
+  <div class="card">
+    <h1>Player Stats (Season Leaders)</h1>
+    <p class="muted">Top 10 players by total fantasy points for each position. Adjust season/scoring to reload all tables.</p>
+    <div class="controls">
+      <label class="field">Season
+        <input type="number" id="season" value="2025" min="2015" max="2026">
+      </label>
+      <label class="field">Scoring
+        <select id="scoring">
+          <option value="ppr">PPR</option>
+          <option value="half">Half PPR</option>
+          <option value="standard">Standard</option>
+        </select>
+      </label>
+      <label class="field">Number of Players
+        <input type="number" id="topn" value="10" min="5" max="50">
+      </label>
+      <button type="button" onclick="fetchAll()">Reload All</button>
+      <span class="pill" id="status-pill">Ready</span>
+    </div>
+  </div>
+
+  <div class="grid" id="tables-grid">
+    <!-- tables injected -->
+  </div>
+</div>
+
+<script>
+  const statusPill = document.getElementById("status-pill");
+  const grid = document.getElementById("tables-grid");
+  const positions = [
+    { key: "QB", label: "Quarterbacks" },
+    { key: "RB", label: "Running Backs" },
+    { key: "WR", label: "Wide Receivers" },
+    { key: "TE", label: "Tight Ends" },
+    { key: "DEF", label: "Defenses" },
+  ];
+
+  function tableShell(title) {
+    return `
+      <div class="card table-card" data-title="${title}" data-pos="">
+        <div class="table-title">
+          <h2 style="margin:0;">${title}</h2>
+          <span class="pill"></span>
+        </div>
+        <div class="table-body muted">Loading…</div>
+      </div>
+    `;
+  }
+
+  function formatValue(val) {
+    if (val === null || val === undefined) return "";
+    if (typeof val === "number") {
+      const isInt = Number.isInteger(val);
+      return isInt ? val.toString() : val.toFixed(2);
+    }
+    return val;
+  }
+
+  async function fetchPosition(pos, season, scoring, top) {
+    const card = [...document.querySelectorAll(".card.table-card")].find(c => c.dataset.title === pos.label);
+    const body = card ? card.querySelector(".table-body") : null;
+    const meta = card ? card.querySelector(".pill") : null;
+    if (!body) return;
+    if (card) card.dataset.pos = pos.key;
+    const params = new URLSearchParams({ position: pos.key, season, scoring, top });
+    try {
+      const res = await fetch("/api/season-leaders/?" + params.toString());
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load");
+      renderTable(body, data.rows || [], pos.key);
+      if (meta) meta.textContent = `${season} • ${pos.key}`;
+    } catch (err) {
+      body.innerHTML = `<div class="muted">Error: ${err.message}</div>`;
+      if (meta) meta.textContent = "Error";
+    }
+  }
+
+  function renderTable(container, rows, posKey) {
+    if (!rows || rows.length === 0) {
+      container.innerHTML = "<div class='muted'>No data.</div>";
+      container.dataset.rows = "[]";
+      return;
+    }
+    let baseKeys = ["player_name", "team", "games", "fantasy_points_total", "fantasy_points_per_game"];
+    const extrasByPos = {
+      WR: ["receiving_yards", "targets", "receptions", "receiving_td"],
+      TE: ["receiving_yards", "targets", "receptions", "receiving_td"],
+      RB: ["rushing_yards", "rushing_attempts", "rushing_td", "receiving_yards", "receptions"],
+      QB: ["passing_yards", "passing_tds", "rushing_yards", "rushing_td"],
+      DEF: ["opp_pass_yds_per_g", "opp_pass_tds_total", "opp_rush_yds_per_g", "opp_rush_tds_total", "opp_total_yds_per_g"],
+    };
+    if (posKey === "DEF") {
+      baseKeys = ["team", "games"];
+    }
+    const labels = {
+      player_name: "Player",
+      team: "Team",
+      games: "Games",
+      fantasy_points_total: "Fantasy Pts (Total)",
+      fantasy_points_per_game: "Fantasy Pts / Game",
+      receiving_yards: "Rec Yards",
+      targets: "Targets",
+      receptions: "Receptions",
+      receiving_td: "Rec TDs",
+      rushing_yards: "Rush Yards",
+      rushing_attempts: "Rush Att",
+      rushing_td: "Rush TDs",
+      passing_yards: "Pass Yards",
+      passing_tds: "Pass TDs",
+      opp_pass_yds_per_g: "Opp Pass Yds/G",
+      opp_pass_tds_total: "Opp Pass TDs",
+      opp_rush_yds_per_g: "Opp Rush Yds/G",
+      opp_rush_tds_total: "Opp Rush TDs",
+      opp_total_yds_per_g: "Opp Total Yds/G",
+    };
+    const keysAvailable = Object.keys(rows[0]);
+    const keys = [...baseKeys, ...(extrasByPos[posKey] || [])].filter(k => keysAvailable.includes(k));
+    const header = `<tr>${keys.map(k => `<th data-key="${k}">${labels[k] || k}</th>`).join("")}</tr>`;
+    const body = rows.map(r => `<tr>${keys.map(k => `<td>${formatValue(r[k])}</td>`).join("")}</tr>`).join("");
+    container.innerHTML = `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+    container.dataset.rows = JSON.stringify(rows);
+    container.dataset.keys = JSON.stringify(keys);
+    container.dataset.pos = posKey;
+  }
+
+  async function fetchAll() {
+    statusPill.textContent = "Loading...";
+    const season = document.getElementById("season").value;
+    const scoring = document.getElementById("scoring").value;
+    const top = document.getElementById("topn").value;
+    grid.innerHTML = positions.map(p => tableShell(p.label)).join("");
+    await Promise.all(positions.map(p => fetchPosition(p, season, scoring, top)));
+    statusPill.textContent = "Loaded";
+  }
+
+  // initial load
+  fetchAll();
+
+  // table sorting for all tables
+  grid.addEventListener("click", (e) => {
+    const th = e.target.closest("th");
+    if (!th || !th.dataset.key) return;
+    const table = th.closest(".table-body");
+    if (!table) return;
+    const key = th.dataset.key;
+    const rows = JSON.parse(table.dataset.rows || "[]");
+    const keys = JSON.parse(table.dataset.keys || "[]");
+    if (!rows.length) return;
+    const currentDir = th.dataset.dir === "asc" ? "desc" : "asc";
+    const sorted = [...rows].sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+      if (typeof av === "number" && typeof bv === "number") {
+        return currentDir === "asc" ? av - bv : bv - av;
+      }
+      return currentDir === "asc"
+        ? String(av ?? "").localeCompare(String(bv ?? ""))
+        : String(bv ?? "").localeCompare(String(av ?? ""));
+    });
+    th.dataset.dir = currentDir;
+    const posKey = table.dataset.pos;
+    const labels = {
+      player_name: "Player",
+      team: "Team",
+      games: "Games",
+      fantasy_points_total: "Fantasy Pts (Total)",
+      fantasy_points_per_game: "Fantasy Pts / Game",
+      receiving_yards: "Rec Yards",
+      targets: "Targets",
+      receptions: "Receptions",
+      receiving_td: "Rec TDs",
+      rushing_yards: "Rush Yards",
+      rushing_attempts: "Rush Att",
+      rushing_td: "Rush TDs",
+      passing_yards: "Pass Yards",
+      passing_tds: "Pass TDs",
+      opp_pass_yds_per_g: "Opp Pass Yds/G",
+      opp_pass_tds_total: "Opp Pass TDs",
+      opp_rush_yds_per_g: "Opp Rush Yds/G",
+      opp_rush_tds_total: "Opp Rush TDs",
+      opp_total_yds_per_g: "Opp Total Yds/G",
+    };
+    const header = `<tr>${keys.map(k => `<th data-key="${k}" data-dir="${th.dataset.dir}">${labels[k] || k}</th>`).join("")}</tr>`;
+    const body = sorted.map(r => `<tr>${keys.map(k => `<td>${formatValue(r[k])}</td>`).join("")}</tr>`).join("");
+    table.innerHTML = `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+    table.dataset.rows = JSON.stringify(sorted);
+    table.dataset.keys = JSON.stringify(keys);
+  });
+</script>
+{% endblock %}
